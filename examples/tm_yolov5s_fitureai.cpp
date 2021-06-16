@@ -21,12 +21,15 @@
  * Copyright (c) 2021, OPEN AI LAB
  * Author: xwwang@openailab.com
  * Author: stevenwudi@fiture.com
+ * 
+ * original model: https://github.com/ultralytics/yolov5
  */
 
-#include <cmath>
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <cmath>
+#include <stdlib.h>
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
@@ -165,7 +168,7 @@ static void generate_proposals(int stride,  const float* feat, float prob_thresh
                 {
                     float score = feat[a * feat_w * feat_h * score_jump + h * feat_w * score_jump + w * score_jump + s +
                                        5];
-                   if(score > class_score)
+                    if(score > class_score)
                     {
                         class_index = s;
                         class_score = score;
@@ -243,7 +246,7 @@ static void draw_objects(const cv::Mat& bgr, const std::vector<Object>& objects)
                     cv::Scalar(0, 0, 0));
     }
 
-    cv::imwrite("yolov5_timvx_letterbox_out.jpg", image);
+    cv::imwrite("yolov5_out.jpg", image);
 }
 
 void show_usage()
@@ -253,8 +256,7 @@ void show_usage()
             "[Usage]:  [-h]\n    [-m model_file] [-i image_file] [-r repeat_count] [-t thread_count]\n");
 }
 
-void get_input_data_focus_uint8(const char* image_file, uint8_t* input_data, int letterbox_rows, int letterbox_cols, const float* mean,
-                                const float* scale, float input_scale, int zero_point)
+void get_input_data_focus(const char* image_file, float* input_data, int letterbox_rows, int letterbox_cols, const float* mean, const float* scale)
 {
     cv::Mat sample = cv::imread(image_file, 1);
     cv::Mat img;
@@ -289,7 +291,7 @@ void get_input_data_focus_uint8(const char* image_file, uint8_t* input_data, int
 
     img_new.convertTo(img_new, CV_32FC3);
     float* img_data   = (float* )img_new.data;
-    float* input_temp = (float* )malloc(3 * (size_t)letterbox_cols * letterbox_rows * sizeof(float));
+    float* input_temp = (float* )malloc(3 * letterbox_cols * letterbox_rows * sizeof(float));
 
     /* nhwc to nchw */
     for (int h = 0; h < letterbox_rows; h++)
@@ -325,34 +327,31 @@ void get_input_data_focus_uint8(const char* image_file, uint8_t* input_data, int
                                         w;
 
                         /* quant to uint8 */
-                        int udata = (round)(input_temp[in_index] / input_scale + ( float )zero_point);
-                        if (udata > 255)
-                            udata = 255;
-                        else if (udata < 0)
-                            udata = 0;
-
-                        input_data[out_index] = udata;
+                        input_data[out_index] = input_temp[in_index];
                     }
                 }
             }
         }
     }
+
     free(input_temp);
 }
+
 
 int main(int argc, char* argv[])
 {
     const char* model_file = nullptr;
     const char* image_file = nullptr;
+
     int img_c = 3;
     const float mean[3] = {0, 0, 0};
     const float scale[3] = {0.003921, 0.003921, 0.003921};
 
-    // set default letterbox size
+    // allow none square letterbox, set default letterbox size
     int letterbox_rows = 512;
     int letterbox_cols = 288;
 
-    int repeat_count = 100;
+    int repeat_count = 1;
     int num_thread = 1;
 
     int res;
@@ -367,10 +366,10 @@ int main(int argc, char* argv[])
                 image_file = optarg;
                 break;
             case 'r':
-                repeat_count = atoi(optarg);
+                repeat_count = std::strtoul(optarg, nullptr, 10);
                 break;
             case 't':
-                num_thread = atoi(optarg);
+                num_thread = std::strtoul(optarg, nullptr, 10);
                 break;
             case 'h':
                 show_usage();
@@ -409,7 +408,7 @@ int main(int argc, char* argv[])
     struct options opt;
     opt.num_thread = num_thread;
     opt.cluster = TENGINE_CLUSTER_ALL;
-    opt.precision = TENGINE_MODE_UINT8;
+    opt.precision = TENGINE_MODE_FP32;
     opt.affinity = 0;
 
     /* inital tengine */
@@ -420,17 +419,8 @@ int main(int argc, char* argv[])
     }
     fprintf(stderr, "tengine-lite library version: %s\n", get_tengine_version());
 
-    /* create VeriSilicon TIM-VX backend */
-    context_t timvx_context = create_context("timvx", 1);
-    int rtt = add_context_device(timvx_context, "TIMVX");
-    if (0 > rtt)
-    {
-        fprintf(stderr, " add_context_device VSI DEVICE failed.\n");
-        return -1;
-    }
-
     /* create graph, load tengine model xxx.tmfile */
-    graph_t graph = create_graph(timvx_context, "tengine", model_file);
+    graph_t graph = create_graph(nullptr, "tengine", model_file);
     if (graph == nullptr)
     {
         fprintf(stderr, "Create graph failed.\n");
@@ -439,7 +429,7 @@ int main(int argc, char* argv[])
 
     int img_size = letterbox_rows * letterbox_cols * img_c;
     int dims[] = {1, 12, int(letterbox_rows / 2), int(letterbox_cols / 2)};
-    std::vector<uint8_t> input_data(img_size);
+    std::vector<float> input_data(img_size);
 
     tensor_t input_tensor = get_graph_input_tensor(graph, 0, 0);
     if (input_tensor == nullptr)
@@ -454,29 +444,21 @@ int main(int argc, char* argv[])
         return -1;
     }
 
-    if (set_tensor_buffer(input_tensor, input_data.data(), img_size) < 0)
+    if (set_tensor_buffer(input_tensor, input_data.data(), img_size * 4) < 0)
     {
         fprintf(stderr, "Set input tensor buffer failed\n");
         return -1;
     }
 
     /* prerun graph, set work options(num_thread, cluster, precision) */
-    double start = get_current_time();
-    /* prerun graph, set work options(num_thread, cluster, precision) */
     if (prerun_graph_multithread(graph, opt) < 0)
     {
         fprintf(stderr, "Prerun multithread graph failed.\n");
         return -1;
     }
-    double end = get_current_time();
-    double duration = end - start;
-    printf("Prerun takes %.3f ms\n", duration);
 
     /* prepare process input data, set the data mem to input tensor */
-    float input_scale = 0.f;
-    int input_zero_point = 0;
-    get_tensor_quant_param(input_tensor, &input_scale, &input_zero_point, 1);
-    get_input_data_focus_uint8(image_file, input_data.data(), letterbox_rows, letterbox_cols, mean, scale, input_scale, input_zero_point);
+    get_input_data_focus(image_file, input_data.data(), letterbox_rows, letterbox_cols, mean, scale);
 
     /* run graph */
     double min_time = DBL_MAX;
@@ -508,47 +490,12 @@ int main(int argc, char* argv[])
     tensor_t p16_output = get_graph_output_tensor(graph, 1, 0);
     tensor_t p32_output = get_graph_output_tensor(graph, 2, 0);
 
-    /* dequant output data */
-    float p8_scale = 0.f;
-    float p16_scale = 0.f;
-    float p32_scale = 0.f;
-    int p8_zero_point = 0;
-    int p16_zero_point = 0;
-    int p32_zero_point = 0;
-
-    get_tensor_quant_param(p8_output, &p8_scale, &p8_zero_point, 1);
-    get_tensor_quant_param(p16_output, &p16_scale, &p16_zero_point, 1);
-    get_tensor_quant_param(p32_output, &p32_scale, &p32_zero_point, 1);
-
-    int p8_count = get_tensor_buffer_size(p8_output) / sizeof(uint8_t);
-    int p16_count = get_tensor_buffer_size(p16_output) / sizeof(uint8_t);
-    int p32_count = get_tensor_buffer_size(p32_output) / sizeof(uint8_t);
-
-    std::vector<float> p8_data(p8_count);
-    std::vector<float> p16_data(p16_count);
-    std::vector<float> p32_data(p32_count);
-
-    uint8_t* p8_data_u8  = ( uint8_t* )get_tensor_buffer(p8_output);
-    uint8_t* p16_data_u8 = ( uint8_t* )get_tensor_buffer(p16_output);
-    uint8_t* p32_data_u8 = ( uint8_t* )get_tensor_buffer(p32_output);
-
-    for (int c = 0; c < p8_count; c++)
-    {
-        p8_data[c] = (( float )p8_data_u8[c] - ( float )p8_zero_point) * p8_scale;
-    }
-
-    for (int c = 0; c < p16_count; c++)
-    {
-        p16_data[c] = (( float )p16_data_u8[c] - ( float )p16_zero_point) * p16_scale;
-    }
-
-    for (int c = 0; c < p32_count; c++)
-    {
-        p32_data[c] = (( float )p32_data_u8[c] - ( float )p32_zero_point) * p32_scale;
-    }
+    float* p8_data = ( float*)get_tensor_buffer(p8_output);
+    float* p16_data = ( float*)get_tensor_buffer(p16_output);
+    float* p32_data = ( float*)get_tensor_buffer(p32_output);
 
     /* postprocess */
-    const float prob_threshold = 0.4f;
+    const float prob_threshold = 0.25f;
     const float nms_threshold = 0.45f;
 
     std::vector<Object> proposals;
@@ -557,11 +504,11 @@ int main(int argc, char* argv[])
     std::vector<Object> objects32;
     std::vector<Object> objects;
 
-    generate_proposals(32, p32_data.data(), prob_threshold, objects32, letterbox_cols, letterbox_rows);
+    generate_proposals(32, p32_data, prob_threshold, objects32, letterbox_cols, letterbox_rows);
     proposals.insert(proposals.end(), objects32.begin(), objects32.end());
-    generate_proposals(16, p16_data.data(), prob_threshold, objects16, letterbox_cols, letterbox_rows);
+    generate_proposals(16, p16_data, prob_threshold, objects16, letterbox_cols, letterbox_rows);
     proposals.insert(proposals.end(), objects16.begin(), objects16.end());
-    generate_proposals( 8, p8_data.data(), prob_threshold, objects8, letterbox_cols, letterbox_rows);
+    generate_proposals( 8, p8_data, prob_threshold, objects8, letterbox_cols, letterbox_rows);
     proposals.insert(proposals.end(), objects8.begin(), objects8.end());
 
     qsort_descent_inplace(proposals);

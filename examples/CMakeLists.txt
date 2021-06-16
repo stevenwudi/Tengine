@@ -127,6 +127,8 @@ IF (OpenCV_FOUND)
     TENGINE_EXAMPLE_CV (tm_yolov4_tiny           tm_yolov4_tiny.cpp)
     TENGINE_EXAMPLE_CV (tm_yolov4_tiny_uint8     tm_yolov4_tiny_uint8.cpp)
     TENGINE_EXAMPLE_CV (tm_yolov5s               tm_yolov5s.cpp)
+    TENGINE_EXAMPLE_CV (tm_yolov5s_fitureai      tm_yolov5s_fitureai.cpp)
+
     TENGINE_EXAMPLE_CV (tm_unet                  tm_unet.cpp)
     TENGINE_EXAMPLE_CV (tm_yolov5s_lewis         tm_yolov5s_lewis.cpp)
 
